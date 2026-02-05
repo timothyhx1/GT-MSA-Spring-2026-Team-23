@@ -137,6 +137,25 @@ def load_polymarket_data() -> dict[str, pd.DataFrame]:
             try:
                 logging.info(f"Loading Polymarket data: {filename}")
                 df = pd.read_parquet(file_path)
+                
+                # Fix timestamp corruption (seconds sometimes interpreted as milliseconds)
+                for col in df.columns:
+                    if any(x in col.lower() for x in ["timestamp", "trade", "created_at", "end_date"]):
+                        if pd.api.types.is_datetime64_any_dtype(df[col]):
+                            if not df[col].empty and df[col].max() < pd.Timestamp("2020-01-01"):
+                                logging.info(f"  Fixing corrupted timestamps in column: {col}")
+                                # Scale up by 1000 to correct seconds-as-ms bug.
+                                # Use astype('datetime64[ns]') to ensure we are working with nanoseconds
+                                # before scaling, then convert back.
+                                ns_values = df[col].values.astype("datetime64[ns]").astype("int64")
+                                df[col] = pd.to_datetime(ns_values * 1000)
+                                
+                            # Enforce 2020+ constraint (replace placeholders/zeros with NaT)
+                            if not df[col].empty:
+                                mask = df[col] < pd.Timestamp("2020-01-01")
+                                if mask.any():
+                                    df.loc[mask, col] = pd.NaT
+                                
                 data[key] = df
                 logging.info(f"  Loaded {len(df)} rows from {filename}")
             except Exception as e:

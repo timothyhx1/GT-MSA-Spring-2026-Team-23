@@ -6,6 +6,7 @@ using Polars with lazy evaluation for efficient data processing.
 """
 
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -145,16 +146,66 @@ def load_polymarket_data(datadir: Path) -> Optional[dict[str, pl.DataFrame]]:
                 if datetime_cols:
                     markets_df = markets_df.with_columns(datetime_cols)
                 
+                # Fix timestamp corruption
+                for col in markets_df.columns:
+                    if any(x in col.lower() for x in ["timestamp", "trade", "created_at", "end_date"]):
+                        if markets_df[col].dtype == pl.Datetime or markets_df[col].dtype == pl.Date:
+                            if not markets_df[col].is_empty() and markets_df[col].max() < datetime(2020, 1, 1):
+                                markets_df = markets_df.with_columns((pl.col(col).cast(pl.Int64) * 1000).cast(pl.Datetime))
+                                
+                        # Enforce 2020+ constraint (replace placeholders/zeros with null)
+                        if markets_df[col].dtype == pl.Datetime or markets_df[col].dtype == pl.Date:
+                             markets_df = markets_df.with_columns(
+                                 pl.when(pl.col(col) < datetime(2020, 1, 1))
+                                 .then(None)
+                                 .otherwise(pl.col(col))
+                                 .alias(col)
+                             )
+                
                 data["markets"] = markets_df
                 print(f"Loaded {len(markets_df)} markets.")
 
             if odds_path.exists():
                 odds_df = pl.scan_parquet(odds_path).collect()
+                
+                # Fix timestamp corruption
+                for col in odds_df.columns:
+                    if any(x in col.lower() for x in ["timestamp", "trade", "created_at", "end_date"]):
+                        if odds_df[col].dtype == pl.Datetime or odds_df[col].dtype == pl.Date:
+                            if not odds_df[col].is_empty() and odds_df[col].max() < datetime(2020, 1, 1):
+                                odds_df = odds_df.with_columns((pl.col(col).cast(pl.Int64) * 1000).cast(pl.Datetime))
+                                
+                        # Enforce 2020+ constraint (replace placeholders/zeros with null)
+                        if odds_df[col].dtype == pl.Datetime or odds_df[col].dtype == pl.Date:
+                             odds_df = odds_df.with_columns(
+                                 pl.when(pl.col(col) < datetime(2020, 1, 1))
+                                 .then(None)
+                                 .otherwise(pl.col(col))
+                                 .alias(col)
+                             )
+                            
                 data["odds"] = odds_df
                 print(f"Loaded {len(odds_df)} odds history records.")
 
             if summary_path.exists():
                 summary_df = pl.scan_parquet(summary_path).collect()
+                
+                # Fix timestamp corruption
+                for col in summary_df.columns:
+                    if any(x in col.lower() for x in ["timestamp", "trade", "created_at", "end_date"]):
+                        if summary_df[col].dtype == pl.Datetime or summary_df[col].dtype == pl.Date:
+                            if not summary_df[col].is_empty() and summary_df[col].max() < datetime(2020, 1, 1):
+                                summary_df = summary_df.with_columns((pl.col(col).cast(pl.Int64) * 1000).cast(pl.Datetime))
+                                
+                        # Enforce 2020+ constraint (replace placeholders/zeros with null)
+                        if summary_df[col].dtype == pl.Datetime or summary_df[col].dtype == pl.Date:
+                             summary_df = summary_df.with_columns(
+                                 pl.when(pl.col(col) < datetime(2020, 1, 1))
+                                 .then(None)
+                                 .otherwise(pl.col(col))
+                                 .alias(col)
+                             )
+                            
                 data["summary"] = summary_df
                 print(f"Loaded {len(summary_df)} summary records.")
 
