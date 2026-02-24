@@ -1,6 +1,6 @@
 # Polymarket Finance & Politics Parquet Schemas
 
-This document details the schemas for the 6 Parquet files. All files are located in `data/Polymarket/`.
+This document details the schemas for the 6 Parquet files exported from the Polymarket DuckDB. All files are located in `bitcoin_project_polymarket/parquet_export/`.
 
 ## Timestamp Integrity Notes
 Some Polymarket parquet files contain timestamp columns that are stored with

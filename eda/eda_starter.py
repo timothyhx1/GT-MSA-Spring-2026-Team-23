@@ -15,6 +15,15 @@ import polars as pl
 import psutil
 import seaborn as sns
 
+import numpy as np
+import pandas as pd
+
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.svm import LinearSVC
+from sklearn.metrics import classification_report
+
 # --- Configuration ---
 # Robustly determine the project root directory
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -84,8 +93,6 @@ def track_memory(operation_name: str):
 
 
 # --- Data Loading Functions ---
-
-
 def load_bitcoin_data(filepath: Path) -> Optional[pl.DataFrame]:
     """
     Load Bitcoin data from CSV using Polars lazy scan.
@@ -110,7 +117,6 @@ def load_bitcoin_data(filepath: Path) -> Optional[pl.DataFrame]:
         print(f"Error loading Bitcoin data: {e}")
         return None
 
-
 def load_polymarket_data(datadir: Path) -> Optional[dict[str, pl.DataFrame]]:
     """
     Load Polymarket data from parquet files using Polars lazy scan.
@@ -123,7 +129,10 @@ def load_polymarket_data(datadir: Path) -> Optional[dict[str, pl.DataFrame]]:
     """
     print(f"Loading Polymarket data from {datadir}...")
     markets_path = datadir / "finance_politics_markets.parquet"
+    tokens_path = datadir / "finance_politics_tokens.parquet"
+    trades_path = datadir / "finance_politics_trades.parquet"
     odds_path = datadir / "finance_politics_odds_history.parquet"
+    event_path = datadir / "finance_politics_event_stats.parquet"
     summary_path = datadir / "finance_politics_summary.parquet"
 
     data: dict[str, pl.DataFrame] = {}
@@ -209,6 +218,39 @@ def load_polymarket_data(datadir: Path) -> Optional[dict[str, pl.DataFrame]]:
                 data["summary"] = summary_df
                 print(f"Loaded {len(summary_df)} summary records.")
 
+            if tokens_path.exists():
+                tokens_df = pl.scan_parquet(tokens_path).collect()
+                data["tokens"] = tokens_df
+                print(f"Loaded {len(tokens_df)} tokens records.")
+
+            if trades_path.exists():
+                trades_df = pl.scan_parquet(trades_path).collect()
+
+                # Fix timestamp corruption
+                for col in trades_df.columns:
+                    if any(x in col.lower() for x in ["timestamp", "trade", "created_at", "end_date"]):
+                        if trades_df[col].dtype == pl.Datetime or trades_df[col].dtype == pl.Date:
+                            if not trades_df[col].is_empty() and trades_df[col].max() < datetime(2020, 1, 1):
+                                trades_df = trades_df.with_columns(
+                                    (pl.col(col).cast(pl.Int64) * 1000).cast(pl.Datetime))
+
+                        # Enforce 2020+ constraint (replace placeholders/zeros with null)
+                        if trades_df[col].dtype == pl.Datetime or trades_df[col].dtype == pl.Date:
+                            trades_df = trades_df.with_columns(
+                                pl.when(pl.col(col) < datetime(2020, 1, 1))
+                                .then(None)
+                                .otherwise(pl.col(col))
+                                .alias(col)
+                            )
+
+                data["trades"] = trades_df
+                print(f"Loaded {len(trades_df)} trades records.")
+
+            if event_path.exists():
+                event_df = pl.scan_parquet(event_path).collect()
+                data["events"] = event_df
+                print(f"Loaded {len(event_df)} events records.")
+
         return data if data else None
     except Exception as e:
         print(f"Error loading Polymarket data: {e}")
@@ -279,9 +321,25 @@ def analyze_polymarket_summary(data: dict[str, pl.DataFrame]) -> None:
             print(f"Total Volume: ${total_volume:,.2f}")
             print(f"Average Volume per Market: ${avg_volume:,.2f}")
 
+    tokens_df = data.get("tokens")
+    if tokens_df is not None:
+        print(f"Total Tokens: {len(tokens_df)}")
+        print(tokens_df.head(5))
+
+    trades_df = data.get("trades")
+    if trades_df is not None:
+        print(f"Total Trades: {len(trades_df)}")
+        print(trades_df.head(5))
+
     odds_df = data.get("odds")
     if odds_df is not None:
         print(f"Total Odds History Records: {len(odds_df):,}")
+        print(odds_df.head(5))
+
+    event_df = data.get("events")
+    if event_df is not None:
+        print(f"Total Events: {len(event_df)}")
+        print(event_df.head(5))
 
     summary_df = data.get("summary")
     if summary_df is not None and "trade_count" in summary_df.columns:
@@ -358,6 +416,289 @@ def plot_polymarket_volume(df: pl.DataFrame) -> None:
 
 # --- Main Execution ---
 
+def btc_features (btc_df: pl.DataFrame) -> pl.DataFrame:
+    btc_df = btc_df.filter(pl.col("PriceUSD").is_not_null())
+    btc_df = btc_df.with_columns(
+        pl.col("PriceUSD").shift(-1).alias("lag_1d"),
+        pl.col("PriceUSD").shift(-2).alias("lag_2d"),
+        pl.col("PriceUSD").shift(-3).alias("lag_3d"),
+        pl.col("PriceUSD").shift(-7).alias("lag_7d"),
+        pl.col("PriceUSD").shift(-30).alias("lag_30d"),
+    )
+    btc_df = btc_df.with_columns(
+        (pl.col("lag_1d") - pl.col("PriceUSD")).alias("delta_1d"),
+        (pl.col("lag_2d") - pl.col("PriceUSD")).alias("delta_2d"),
+        (pl.col("lag_3d") - pl.col("PriceUSD")).alias("delta_3d"),
+        (pl.col("lag_3d") - pl.col("PriceUSD")).alias("delta_7d"),
+        (pl.col("lag_30d") - pl.col("PriceUSD")).alias("delta_30d"),
+        ((pl.col("lag_1d") - pl.col("PriceUSD")) / pl.col("PriceUSD")).alias("change_1d"),
+        ((pl.col("lag_2d") - pl.col("PriceUSD")) / pl.col("PriceUSD")).alias("change_2d"),
+        ((pl.col("lag_3d") - pl.col("PriceUSD")) / pl.col("PriceUSD")).alias("change_3d"),
+        ((pl.col("lag_7d") - pl.col("PriceUSD")) / pl.col("PriceUSD")).alias("change_7d"),
+        ((pl.col("lag_30d") - pl.col("PriceUSD")) / pl.col("PriceUSD")).alias("change_30d")
+    )
+
+    return btc_df
+
+def categorize_markets(markets_df: pl.DataFrame) -> pl.DataFrame:
+    # Cleanup and combine smaller categories
+    markets_df = markets_df.with_columns(
+        pl.when(pl.col("category") == "Politics")
+        .then(pl.lit("Global Politics"))
+        .otherwise(pl.col("category"))
+        .alias("category")
+    )
+    markets_df = markets_df.with_columns(
+        pl.when(pl.col("category") == "Ukraine & Russia")
+        .then(pl.lit("Global Politics"))
+        .otherwise(pl.col("category"))
+        .alias("category")
+    )
+    markets_df = markets_df.with_columns(
+        pl.when(pl.col("category") == "Coronavirus-")
+        .then(pl.lit("Other"))
+        .otherwise(pl.col("category"))
+        .alias("category")
+    )
+    markets_df = markets_df.with_columns(
+        pl.when(pl.col("category") == "Pop-Culture ")
+        .then(pl.lit("Other"))
+        .otherwise(pl.col("category"))
+        .alias("category")
+    )
+    markets_df = markets_df.with_columns(
+        pl.when(pl.col("category") == "Coronavirus")
+        .then(pl.lit("Other"))
+        .otherwise(pl.col("category"))
+        .alias("category")
+    )
+    markets_df = markets_df.with_columns(
+        pl.when(pl.col("category") == "Tech")
+        .then(pl.lit("Other"))
+        .otherwise(pl.col("category"))
+        .alias("category")
+    )
+    # Training to identify correct category
+    markets_df_not_null = markets_df.filter(pl.col("category") != "")
+    texts = markets_df_not_null["question"]
+    labels = markets_df_not_null["category"]
+    X_train, X_test, y_train, y_test = train_test_split(
+        texts, labels, test_size=0.2, random_state=42, stratify=labels
+    )
+
+    model = Pipeline([
+        ("tfidf", TfidfVectorizer(
+            ngram_range=(1, 2),
+            min_df=2,
+            max_df=0.9,
+            sublinear_tf=True,
+            analyzer="word"
+        )),
+        ("clf", LinearSVC(class_weight="balanced"))
+    ])
+
+    model.fit(X_train, y_train)
+    pred = model.predict(X_test)
+    print(classification_report(y_test, pred, digits=3))
+
+    markets_df_new = categorize_blank(markets_df, model)
+
+    patterns_list = ["btc", "bitcoin"]
+    markets_df_new = markets_df_new.with_columns(
+        pl.when(
+            pl.col("question").str.contains_any(
+                patterns_list,
+                ascii_case_insensitive=True
+            ) & (pl.col("category") == "Crypto")
+        )
+        .then(pl.lit("Bitcoin"))
+        .otherwise(pl.col("category"))
+        .alias("category")
+    )
+
+    return markets_df_new
+
+def categorize_blank(
+        df: pl.DataFrame,
+        model,
+        textcol="question",
+        catcol="category",
+        unknown_label: str = "Other",
+        threshold: float = 0.0
+) -> pl.DataFrame:
+    # Create mask for empty values
+    mask = (pl.col(catcol) == "") | (pl.col(catcol).is_null())
+    df_blank = df.filter(mask).select(textcol)
+    texts = df_blank[textcol].to_list()
+
+    # Predict
+    preds = model.predict(texts)
+    scores = model.decision_function(texts)
+    scores = np.asarray(scores)
+
+    # Multiclass margin handling
+    if scores.ndim == 1:
+        conf = np.abs(scores)
+    else:
+        conf = np.max(scores, axis=1)
+
+    thresh_preds = np.where(conf >= threshold, preds, unknown_label)
+
+    # Output
+    df_idx = df.with_row_index("_idx")
+    df_blank_idx = df_idx.filter(mask).select("_idx")
+    pred_df = pl.DataFrame({
+        "_idx": df_blank_idx["_idx"],
+        "new_cat": thresh_preds.tolist()
+    })
+
+    out = (
+        df_idx.join(pred_df, on="_idx", how="left")
+        .with_columns(
+            pl.when((pl.col(catcol) == "") | pl.col(catcol).is_null())
+            .then(pl.col("new_cat"))
+            .otherwise(pl.col(catcol))
+            .alias(catcol)
+        )
+        .drop(["_idx", "new_cat"])
+    )
+    return out
+
+def categorize_market_sentiment(markets_df_bitcoin: pl.DataFrame)-> pl.DataFrame:
+    # Keywords
+    bullish_kw = [
+        "reach", "approve", "hit", "sec approve", "ath", "all time high", "blackrock", "allow", "vanguard",
+        "up or down",
+        "approval", "above", "etf", "spot etf", "buy", "reach", "break", "rally", "listed", "purchase", "hold",
+        "acquires", "accepts"
+    ]
+    bearish_kw = [
+        "dips", "drop", "fall", "below", "dip",
+        "reject", "deny", "lawsuit", "ban", "crackdown", "hack",
+        "crash", "dump", "bear", "down", "not approve", "sell", "liquidate"
+    ]
+    neutral_kw = [
+        "or", "better", "interview", "between",
+        "which", "or", "first", "perform better", "vs", "versus",
+        "say", "tweet", "0 times", "fees", "capture more", "single day fees", "less than"
+    ]
+
+    q = pl.col("question")
+
+    rule1 = (
+            q.str.contains(r"(?i)hit")
+            & q.str.contains(r"(?i)\sor\s")
+            & q.str.contains(r"(?i)first")
+    )
+
+    rule2 = (
+            q.str.contains(r"(?i)up")
+            & q.str.contains(r"(?i)\sor\s")
+            & q.str.contains(r"(?i)down")
+    )
+
+    markets_df_bitcoin_new = markets_df_bitcoin[:600].with_columns(
+        pl.when(rule1)
+        .then(pl.lit("neutral"))
+        .when(rule2)
+        .then(pl.lit("bullish"))
+        .when(any_contains(q, bearish_kw))
+        .then(pl.lit("bearish"))
+        .when(any_contains(q, bullish_kw))
+        .then(pl.lit("bullish"))
+        .when(any_contains(q, neutral_kw))
+        .then(pl.lit("neutral"))
+        .otherwise(pl.lit("neutral"))  # default
+        .alias("stance")
+    )
+
+    texts = markets_df_bitcoin_new["question"]
+    labels = markets_df_bitcoin_new["stance"]
+    X_train, X_test, y_train, y_test = train_test_split(
+        texts, labels, test_size=0.2, random_state=42, stratify=labels
+    )
+
+    sentiment_model = Pipeline([
+        ("tfidf", TfidfVectorizer(
+            ngram_range=(1, 2),
+            min_df=2,
+            max_df=0.9,
+            sublinear_tf=True,
+            analyzer="word"
+        )),
+        ("clf", LinearSVC(class_weight="balanced"))
+    ])
+
+    sentiment_model.fit(X_train, y_train)
+    pred = sentiment_model.predict(X_test)
+    print(classification_report(y_test, pred, digits=3))
+    markets_df_bitcoin = markets_df_bitcoin.join(markets_df_bitcoin_new[["market_id", "stance"]], on="market_id",
+                                                 how="left")
+    markets_df_bitcoin_new = categorize_blank(markets_df_bitcoin, sentiment_model, "question", "stance", "neutral")
+    markets_df_bitcoin_new = markets_df_bitcoin_new.with_columns(
+        pl.when(pl.col("stance") == "neutral").then(0)
+        .when(pl.col("stance") == "bullish").then(1)
+        .when(pl.col("stance") == "bearish").then(-1)
+        .alias("stance_val")
+    )
+    return markets_df_bitcoin_new
+
+def categorize_token_sentiment(tokens_df_bitcoin:pl.DataFrame)->pl.DataFrame:
+    positive_kw = ["Yes", "Long", "Bitcoin", "BTC", "$BITCOIN", "Up"]
+    negative_kw = ["No", "Short", "Down"]
+
+    q = pl.col("outcome")
+
+    tokens_df_bitcoin = tokens_df_bitcoin.with_columns(
+        pl.when(any_contains(q, negative_kw))
+        .then(-1)
+        .when(any_contains(q, positive_kw))
+        .then(1)
+        .otherwise(0)  # default
+        .alias("outcome_val")
+    )
+
+    return tokens_df_bitcoin
+
+def merge_tokens_trades(tokens_df_bitcoin:pl.DataFrame, trades_df:pl.DataFrame)->pl.DataFrame:
+    trades_df_bitcoin = trades_df.join(tokens_df_bitcoin, on="token_id", how="left").filter(
+        pl.col("question").is_not_null())
+    trades_df_bitcoin = trades_df_bitcoin.with_columns(
+        pl.when(pl.col("side") == "BUY").then(1)
+        .when(pl.col("side") == "SELL").then(-1)
+        .otherwise(0)
+        .alias("side_val")
+    )
+    trades_df_bitcoin = trades_df_bitcoin.with_columns(
+        (pl.col("side_val") * pl.col("stance_val") * pl.col("outcome_val")).alias("trade_val"))
+    trades_df_bitcoin = trades_df_bitcoin.with_columns(
+        (pl.col("price") * pl.col("size")).alias("transaction"),
+        (pl.col("size") * pl.col("trade_val")).alias("size_trade_val"),
+        (pl.col("price") * pl.col("size") * pl.col("trade_val")).alias("transaction_trade_val")
+    )
+    return trades_df_bitcoin
+
+def any_contains(col: pl.Expr, kws: list[str]) -> pl.Expr:
+    # case-insensitive substring match
+    return pl.any_horizontal([col.str.contains(rf"(?i){k}") for k in kws])
+
+def trades_daily_agg(trades_df_bitcoin:pl.DataFrame)->pl.DataFrame:
+    trades_df_bitcoin_day = trades_df_bitcoin.group_by(
+        pl.col("timestamp").dt.date().alias("time")
+    ).agg(
+        pl.col("size").sum().alias("daily_volume"),
+        pl.col("transaction").sum().alias("daily_transaction_value"),
+        pl.col("size_trade_val").sum().alias("daily_netstance_volume"),
+        pl.col("transaction_trade_val").sum().alias("daily_netstance_transaction_value"),
+    ).sort("time")
+
+    trades_df_bitcoin_day = trades_df_bitcoin_day.with_columns(
+        (pl.col("daily_netstance_volume") / pl.col("daily_volume")).alias("daily_sentiment_by_volume"),
+        (pl.col("daily_netstance_transaction_value") / pl.col("daily_transaction_value")).alias(
+            "daily_sentiment_by_transaction_value")
+    )
+
+    return trades_df_bitcoin_day
 
 def main() -> None:
     """Main execution function for EDA workflow."""
@@ -370,19 +711,19 @@ def main() -> None:
     poly_data = load_polymarket_data(POLYMARKET_DIR)
 
     # Analyze Bitcoin data
-    if btc_df is not None:
-        with track_memory("analyzing Bitcoin metrics"):
-            analyze_btc_metrics(btc_df)
-        with track_memory("plotting Bitcoin price"):
-            plot_btc_price(btc_df)
+    # if btc_df is not None:
+    #     with track_memory("analyzing Bitcoin metrics"):
+    #         analyze_btc_metrics(btc_df)
+    #     with track_memory("plotting Bitcoin price"):
+    #         plot_btc_price(btc_df)
 
     # Analyze Polymarket data
     if poly_data is not None:
         with track_memory("analyzing Polymarket summary"):
             analyze_polymarket_summary(poly_data)
-        if "markets" in poly_data:
-            with track_memory("plotting Polymarket volume"):
-                plot_polymarket_volume(poly_data["markets"])
+        # if "markets" in poly_data:
+        #     with track_memory("plotting Polymarket volume"):
+        #         plot_polymarket_volume(poly_data["markets"])
 
     # Final memory summary
     final_memory = get_memory_usage_mb()
