@@ -31,7 +31,7 @@ MVRV_COL = "CapMVRVCur"
 # Strategy parameters
 MIN_W = 1e-6
 MA_WINDOW = 200  # 200-day simple moving average
-MVRV_GRADIENT_WINDOW = 30  # Window for MVRV trend detection
+MVRV_GRADIENT_WINDOW = 14  # Window for MVRV trend detection
 MVRV_ROLLING_WINDOW = 365  # Window for MVRV Z-score normalization
 MVRV_ACCEL_WINDOW = 14  # Window for acceleration calculation
 DYNAMIC_STRENGTH = 5.0  # Multiplier for weight adjustments

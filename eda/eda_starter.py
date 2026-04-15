@@ -670,7 +670,7 @@ def merge_tokens_trades(tokens_df_bitcoin:pl.DataFrame, trades_df:pl.DataFrame)-
         .alias("side_val")
     )
     trades_df_bitcoin = trades_df_bitcoin.with_columns(
-        (pl.col("side_val") * pl.col("stance_val") * pl.col("outcome_val")).alias("trade_val"))
+        (pl.col("side_val") * pl.col("stance_val")).alias("trade_val"))
     trades_df_bitcoin = trades_df_bitcoin.with_columns(
         (pl.col("price") * pl.col("size")).alias("transaction"),
         (pl.col("size") * pl.col("trade_val")).alias("size_trade_val"),

@@ -7,7 +7,7 @@ from template.prelude_template import load_data
 from template.backtest_template import run_full_analysis
 
 # Import Example 1 model
-from example_1.model_development_example_1 import precompute_features, compute_window_weights
+from final.model_v2 import precompute_features, compute_window_weights
 # from template.model_development_template import precompute_features, compute_window_weights
 
 
@@ -47,7 +47,7 @@ def main():
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     
-    logging.info("Starting Bitcoin DCA Strategy Analysis - Example 1 (Polymarket)")
+    logging.info("Starting Bitcoin DCA Strategy Analysis")
     
     # 1. Load Data
     btc_df = load_data()
